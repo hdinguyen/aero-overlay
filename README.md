@@ -38,11 +38,11 @@ Row 4: z x c v b n m , . /
 4. Press any key to hide the overlay
 
 ## Performance Features
-
-### Resource Optimization
-- **On-Demand Mode** (default): No background refresh, data updates only when overlay is shown
+- **Instant Display**: Overlay appears immediately (0ms blocking) with cached/empty data
+- **Async Data Loading**: Real-time updates happen in background using non-blocking tasks
+- **Visual Loading Indicators**: Shows "Loading..." state while data fetches
+- **Live Updates**: Overlay refreshes automatically when new data arrives
 - **Smart Caching**: 10-second cache duration to minimize CLI calls
-- **User Activity Tracking**: Prevents unnecessary refreshes during idle periods
 - **Single CLI Call**: Uses format command for 80% faster data fetching (~22ms vs 100ms+)
 
 ### Usage Modes

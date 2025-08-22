@@ -9,12 +9,13 @@
 -- Row 4: z x c v b n m , . /
 --
 -- Performance optimizations:
+-- - INSTANT overlay display (0ms blocking) - shows immediately with cached/empty data
+-- - Async data fetching using hs.task (non-blocking background updates)
 -- - Single CLI call using format command (~22ms vs 100ms+ for sequential calls)
 -- - 10-second data caching to avoid redundant CLI calls
+-- - Visual loading indicators while data updates in background
+-- - Live overlay refresh when new data arrives
 -- - On-demand refresh mode (no background refresh) to minimize resource usage
--- - Smart background refresh mode available with strict conditions
--- - User activity tracking to prevent unnecessary refreshes
--- - Immediate overlay display using cached data
 
 local M = {}
 
@@ -48,6 +49,10 @@ local isUpdating = false
 local updateTimer = nil
 local lastUserActivity = 0
 local refreshOnDemandOnly = false -- Option to disable background refresh entirely
+
+-- Pre-rendered overlay components
+local preRenderedOverlay = nil
+local overlayNeedsUpdate = true
 
 -- Function to get workspace key from grid position
 local function getWorkspaceKey(col, row)
@@ -205,29 +210,106 @@ local function fetchWorkspaceDataFast()
     return data
 end
 
--- Function to fetch workspace data with caching
+-- Function to fetch workspace data with caching (NEVER blocks)
 local function fetchWorkspaceData()
-    -- Return cached data if valid
-    if isCacheValid() and next(workspaceData) ~= nil then
-        print("Using cached workspace data")
+    -- Always return cached data immediately (even if stale)
+    if next(workspaceData) ~= nil then
         return workspaceData
     end
     
-    -- Avoid multiple simultaneous updates
+    -- If no cache exists, return empty structure for immediate display
+    return {}
+end
+
+-- Async function to update workspace data
+local function updateWorkspaceDataAsync()
+    -- Skip if already updating
     if isUpdating then
-        print("Update already in progress, using cached data")
-        return workspaceData
+        return
     end
     
+    -- Skip if cache is still valid
+    if isCacheValid() and next(workspaceData) ~= nil then
+        return
+    end
+    
+    print("Starting async workspace data update...")
     isUpdating = true
-    local data = fetchWorkspaceDataFast()
     
-    -- Update cache
-    workspaceData = data
-    cacheTimestamp = os.time()
-    isUpdating = false
+    -- Use hs.task for true async execution
+    local task = hs.task.new("/opt/homebrew/bin/aerospace", function(exitCode, stdOut, stdErr)
+        isUpdating = false
+        
+        if exitCode == 0 and stdOut and stdOut ~= "" then
+            -- Parse the formatted output
+            local data = {}
+            local lines = {}
+            
+            -- Split result into lines
+            for line in stdOut:gmatch("[^\r\n]+") do
+                table.insert(lines, line)
+            end
+            
+            for _, line in ipairs(lines) do
+                if line and line ~= "" then
+                    -- Parse format: workspace|app-name|window-title|window-id
+                    local parts = {}
+                    for part in line:gmatch("[^|]+") do
+                        table.insert(parts, part)
+                    end
+                    
+                    if #parts >= 2 then
+                        local workspace = parts[1]
+                        local appName = parts[2]
+                        local windowTitle = parts[3] or ""
+                        local windowId = parts[4] or ""
+                        
+                        if not data[workspace] then
+                            data[workspace] = {}
+                        end
+                        
+                        table.insert(data[workspace], {
+                            appName = appName,
+                            windowTitle = windowTitle,
+                            windowId = windowId
+                        })
+                    end
+                end
+            end
+            
+            -- Update cache
+            workspaceData = data
+            cacheTimestamp = os.time()
+            overlayNeedsUpdate = true
+            
+            print("Async workspace data update completed")
+            
+            -- If overlay is visible, refresh it
+            if isOverlayVisible and overlay then
+                print("Refreshing visible overlay with new data")
+                -- Create new canvas with updated data
+                local screen = hs.screen.mainScreen()
+                local screenFrame = screen:frame()
+                local newCanvas = hs.canvas.new(screenFrame)
+                
+                -- Copy elements from new overlay
+                local tempCanvas = createOverlayCanvas()
+                for i = 1, #tempCanvas do
+                    newCanvas[i] = tempCanvas[i]
+                end
+                
+                -- Replace the overlay
+                overlay:delete()
+                overlay = newCanvas
+                overlay:show()
+            end
+        else
+            print("Async update failed, exit code: " .. exitCode)
+            isUpdating = false
+        end
+    end, {"list-windows", "--all", "--format", "%{workspace}|%{app-name}|%{window-title}|%{window-id}"})
     
-    return data
+    task:start()
 end
 
 -- Function to track user activity
@@ -317,12 +399,12 @@ local function formatAppList(apps)
     return table.concat(appList, "\n")
 end
 
--- Function to create the overlay canvas
-local function createOverlay()
+-- Function to create overlay canvas elements (separated from display)
+local function createOverlayCanvas()
     local screen = hs.screen.mainScreen()
     local screenFrame = screen:frame()
     
-    -- Use cached data if available, otherwise fetch fresh data
+    -- Get data immediately (cached or empty)
     local data = fetchWorkspaceData()
     
     -- Use full screen for overlay
@@ -366,10 +448,19 @@ local function createOverlay()
                 local apps = data[workspaceKey] or data[string.upper(workspaceKey)] or {}
                 local hasApps = #apps > 0
                 
-                -- Cell background - highlight if has apps
-                local bgColor = hasApps 
-                    and {red = 0.2, green = 0.4, blue = 0.2, alpha = 0.7}  -- Green tint for active
-                    or {red = 0.2, green = 0.2, blue = 0.2, alpha = 0.5}   -- Gray for empty
+                -- Add loading indicator if data is stale/empty and we're updating
+                local isStaleData = not isCacheValid() or (next(data) == nil)
+                local showLoading = isStaleData and isUpdating
+                
+                -- Cell background - highlight if has apps, show loading state
+                local bgColor
+                if showLoading then
+                    bgColor = {red = 0.3, green = 0.3, blue = 0.4, alpha = 0.6}  -- Blue tint for loading
+                elseif hasApps then
+                    bgColor = {red = 0.2, green = 0.4, blue = 0.2, alpha = 0.7}  -- Green tint for active
+                else
+                    bgColor = {red = 0.2, green = 0.2, blue = 0.2, alpha = 0.5}  -- Gray for empty
+                end
                 
                 canvas[elementIndex] = {
                     type = "rectangle",
@@ -392,14 +483,25 @@ local function createOverlay()
                 }
                 elementIndex = elementIndex + 1
                 
-                -- Applications list
-                local appText = formatAppList(apps)
+                -- Applications list with loading indicator
+                local appText
+                local textColor
+                
+                if showLoading then
+                    appText = "Loading..."
+                    textColor = {red = 0.7, green = 0.7, blue = 1, alpha = 1}  -- Light blue for loading
+                elseif hasApps then
+                    appText = formatAppList(apps)
+                    textColor = {red = 0.9, green = 1, blue = 0.9, alpha = 1}  -- Light green for apps
+                else
+                    appText = "No apps"
+                    textColor = {red = 0.5, green = 0.5, blue = 0.5, alpha = 1}  -- Gray for no apps
+                end
+                
                 canvas[elementIndex] = {
                     type = "text",
                     text = appText,
-                    textColor = hasApps 
-                        and {red = 0.9, green = 1, blue = 0.9, alpha = 1}    -- Light green for apps
-                        or {red = 0.5, green = 0.5, blue = 0.5, alpha = 1},  -- Gray for no apps
+                    textColor = textColor,
                     textSize = 10,
                     textFont = "Helvetica",
                     frame = {x = x + 5, y = y + 27, w = cellWidth - 10, h = cellHeight - 32}
@@ -409,6 +511,12 @@ local function createOverlay()
         end
     end
     
+    return canvas
+end
+
+-- Function to create and display overlay instantly
+local function createOverlay()
+    local canvas = createOverlayCanvas()
     return canvas
 end
 
@@ -450,16 +558,16 @@ local function clearTemporaryKeyHandlers()
     temporaryHotkeys = {}
 end
 
--- Function to show overlay
+-- Function to show overlay (INSTANT display)
 local function showOverlay()
     if isOverlayVisible then return end
     
-    print("Showing AeroSpace overlay...")
     local startTime = os.clock()
     
     -- Track user activity
     updateUserActivity()
     
+    -- Create and show overlay immediately with cached/empty data
     overlay = createOverlay()
     overlay:show()
     isOverlayVisible = true
@@ -468,7 +576,10 @@ local function showOverlay()
     setupTemporaryKeyHandlers()
     
     local endTime = os.clock()
-    print("AeroSpace overlay shown in " .. string.format("%.3f", endTime - startTime) .. " seconds - press any key to hide")
+    print("AeroSpace overlay shown instantly in " .. string.format("%.3f", endTime - startTime) .. " seconds")
+    
+    -- Start async data update (non-blocking)
+    updateWorkspaceDataAsync()
 end
 
 -- Function to hide overlay
@@ -517,16 +628,16 @@ local function init()
     -- Initialize user activity tracking
     updateUserActivity()
     
-    -- Pre-populate cache with initial data fetch
-    print("Pre-loading workspace data...")
-    fetchWorkspaceData()
+    -- Start async pre-loading of workspace data (non-blocking)
+    print("Starting async pre-load of workspace data...")
+    updateWorkspaceDataAsync()
     
     -- Start with on-demand mode for maximum efficiency
     -- Users can switch to background mode if needed
     enableOnDemandMode()
     
-    print("AeroSpace overlay initialized with efficient on-demand caching")
-    print("Background refresh disabled by default - data refreshes only when overlay is shown")
+    print("AeroSpace overlay initialized with instant display")
+    print("Overlay will show immediately - data loads in background")
 end
 
 -- Cleanup function
