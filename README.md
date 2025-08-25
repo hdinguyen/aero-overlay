@@ -6,6 +6,18 @@ This project provides a visual overlay system for AeroSpace window manager, insp
 
 An easy way to visualize and control AeroSpace workspaces (https://nikitabobko.github.io/AeroSpace/guide) using Hammerspoon (https://www.hammerspoon.org/go/).
 
+## How it look?
+When you press ALT + ESC the overlay appear to let you know which application belong to which workspace.
+There are 3 types of cell appear:
+1. Gray CELL: The available workspace on aerospace but no app in there
+2. Green CELL: The workspace had included at least 1 application
+3. Red CELL: The current workspace display on your monitor
+
+Press any other key to off the overlay.
+
+![Example Overlay Screenshot](example.png)
+
+
 ## Features
 
 ### 1. Visual Workspace Overlay
